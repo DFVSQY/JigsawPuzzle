@@ -10,6 +10,7 @@ Shader "Custom/PuzzlePieceVertexData"
         _Color ("Tint", Color) = (1,1,1,1)
 
         // --- SDF 基础属性 ---
+        // 注意：现在的数值统一代表相对于“宽度”的比例。例如 0.1 代表宽度的 10%
         _CornerRadius ("Corner Radius", Range(0, 0.5)) = 0.1
         
         // --- 双描边属性 ---
@@ -67,7 +68,8 @@ Shader "Custom/PuzzlePieceVertexData"
             CGPROGRAM
             #pragma vertex vert
             #pragma fragment frag
-            #pragma target 2.0
+            // 【修改点】升级为 3.0，因为使用了 ddx ddy 导数计算指令
+            #pragma target 3.0
 
             #include "UnityCG.cginc"
             #include "UnityUI.cginc"
@@ -98,17 +100,17 @@ Shader "Custom/PuzzlePieceVertexData"
                 float4 connState : TEXCOORD4; // T, R, B, L
             };
 
-            fixed4 _Color;
+            // 【优化】：内存对齐，避免部分老旧移动端设备的常量缓冲区读错数据
             sampler2D _MainTex;
-            float4 _ClipRect;
+            fixed4 _Color;
+            fixed4 _OuterOutlineColor;
+            fixed4 _InnerOutlineColor;
             fixed4 _TextureSampleAdd;
+            float4 _ClipRect;
 
             float _CornerRadius;
             float _OuterOutlineWidth;
-            fixed4 _OuterOutlineColor;
             float _InnerOutlineWidth;
-            fixed4 _InnerOutlineColor;
-            
             float _EdgeShrink;
 
             v2f vert(appdata_t v)
@@ -137,6 +139,7 @@ Shader "Custom/PuzzlePieceVertexData"
 
             fixed4 frag(v2f IN) : SV_Target
             {
+                // 从顶点数据读取网格和连接状态
                 float _NumCols = IN.gridInfo.x;
                 float _NumRows = IN.gridInfo.y;
                 float _CellIndex = IN.gridInfo.z;
@@ -148,41 +151,43 @@ Shader "Custom/PuzzlePieceVertexData"
                 float isLeft   = _ConnectedState.w;
 
                 // ==============================
+                // 0. 自适应长宽比修正
+                // ==============================
+                float rateX = length(float2(ddx(IN.uv.x), ddy(IN.uv.x)));
+                float rateY = length(float2(ddx(IN.uv.y), ddy(IN.uv.y)));
+                float scaleY = (rateY > 1e-6) ? (rateX / rateY) : 1.0; 
+                
+                float2 scaleSpace = float2(1.0, scaleY);
+                float2 uv_centered_scaled = (IN.uv - 0.5) * scaleSpace;
+
+
+                // ==============================
                 // 1. [双重坐标系统准备]
                 // ==============================
-                
-                // --- 系统 A: Mask 坐标系 (用于遮罩/裁切) ---
-                // 逻辑: 未连接时缩进(_EdgeShrink)，已连接时贴边(0.0)
                 float maskShrinkTop    = (isTop > 0.5)    ? 0.0 : _EdgeShrink;
                 float maskShrinkRight  = (isRight > 0.5)  ? 0.0 : _EdgeShrink;
                 float maskShrinkBottom = (isBottom > 0.5) ? 0.0 : _EdgeShrink;
                 float maskShrinkLeft   = (isLeft > 0.5)   ? 0.0 : _EdgeShrink;
 
-                float2 maskSize = float2(1.0 - maskShrinkLeft - maskShrinkRight, 1.0 - maskShrinkBottom - maskShrinkTop);
+                float2 baseSize = float2(1.0, 1.0) * scaleSpace;
+                float2 maskSize = baseSize - float2(maskShrinkLeft + maskShrinkRight, maskShrinkBottom + maskShrinkTop);
                 float2 maskHalfSize = maskSize * 0.5;
                 float2 maskCenterOffset = float2((maskShrinkLeft - maskShrinkRight) * 0.5, (maskShrinkBottom - maskShrinkTop) * 0.5);
-                float2 mask_uv_centered = IN.uv - 0.5 - maskCenterOffset;
+                float2 mask_uv_centered = uv_centered_scaled - maskCenterOffset;
 
-                // --- 系统 B: SDF 坐标系 (用于绘制形状) ---
-                // [关键修复]
-                // 如果一边连上了，我们将 SDF 的形状向外"膨胀"一个外描边的宽度。
-                // 这样，处于物理边缘的像素，就会落在 SDF 的"内描边(白)"区域，而不是"外描边(黑)"区域。
-                // 从而消除了垂直方向的黑色封口。
-                
                 float expandTop    = (isTop > 0.5)    ? _OuterOutlineWidth : 0.0;
                 float expandRight  = (isRight > 0.5)  ? _OuterOutlineWidth : 0.0;
                 float expandBottom = (isBottom > 0.5) ? _OuterOutlineWidth : 0.0;
                 float expandLeft   = (isLeft > 0.5)   ? _OuterOutlineWidth : 0.0;
 
-                // SDF 的尺寸 = Mask尺寸 + 向外膨胀的量
                 float2 sdfSize = maskSize + float2(expandLeft + expandRight, expandBottom + expandTop);
                 float2 sdfHalfSize = sdfSize * 0.5;
-                // SDF 的中心也需要相应偏移
                 float2 sdfCenterOffset = maskCenterOffset + float2((expandRight - expandLeft) * 0.5, (expandTop - expandBottom) * 0.5);
-                float2 sdf_uv_centered = IN.uv - 0.5 - sdfCenterOffset;
+                float2 sdf_uv_centered = uv_centered_scaled - sdfCenterOffset;
+
 
                 // ==============================
-                // 2. [SDF 计算] (使用膨胀后的坐标系)
+                // 2. [SDF 计算] 
                 // ==============================
                 float r_TR = (isTop > 0.5 || isRight > 0.5) ? 0.0 : _CornerRadius;
                 float r_BR = (isBottom > 0.5 || isRight > 0.5) ? 0.0 : _CornerRadius;
@@ -192,44 +197,40 @@ Shader "Custom/PuzzlePieceVertexData"
 
                 float dist = sdRoundedBoxIndependent(sdf_uv_centered, sdfHalfSize, radii);
                 float delta = fwidth(dist);
-                float shapeAlpha = 1.0 - smoothstep(0.0 - delta, 0.0 + delta, dist);
+                
+                // 【核心修复】：防止形状 Alpha 溢出反相
+                float shapeAlpha = saturate(1.0 - smoothstep(0.0 - delta, 0.0 + delta, dist));
 
                 float totalWidth = _OuterOutlineWidth + _InnerOutlineWidth;
                 float innerStrokeFactor = smoothstep(-totalWidth - delta, -totalWidth + delta, dist);
                 float outerStrokeFactor = smoothstep(-_OuterOutlineWidth - delta, -_OuterOutlineWidth + delta, dist);
 
                 // ==============================
-                // 3. [遮罩逻辑] (使用原始 Mask 坐标系)
+                // 3. [遮罩逻辑]
                 // ==============================
-                // 注意：这里使用 maskHalfSize 和 mask_uv_centered
                 float mask = 1.0;
                 float epsilon = delta * 1.5;
                 float2 cutThreshold = maskHalfSize - totalWidth - epsilon;
-                float2 cornerZone = maskHalfSize - totalWidth; // 保护区阈值
+                float2 cornerZone = maskHalfSize - totalWidth; 
 
-                // [Top Mask]
                 if (isTop > 0.5 && mask_uv_centered.y > cutThreshold.y)
                 {
-                    // 保护逻辑：如果邻边未连接，保留该角的垂直描边
                     bool preserveRight = (isRight < 0.5) && (mask_uv_centered.x > cornerZone.x);
                     bool preserveLeft  = (isLeft < 0.5)  && (mask_uv_centered.x < -cornerZone.x);
                     if (!preserveRight && !preserveLeft) mask = 0.0;
                 }
-                // [Right Mask]
                 if (isRight > 0.5 && mask_uv_centered.x > cutThreshold.x)
                 {
                     bool preserveTop    = (isTop < 0.5)    && (mask_uv_centered.y > cornerZone.y);
                     bool preserveBottom = (isBottom < 0.5) && (mask_uv_centered.y < -cornerZone.y);
                     if (!preserveTop && !preserveBottom) mask = 0.0;
                 }
-                // [Bottom Mask]
                 if (isBottom > 0.5 && mask_uv_centered.y < -cutThreshold.y)
                 {
                     bool preserveRight = (isRight < 0.5) && (mask_uv_centered.x > cornerZone.x);
                     bool preserveLeft  = (isLeft < 0.5)  && (mask_uv_centered.x < -cornerZone.x);
                     if (!preserveRight && !preserveLeft) mask = 0.0;
                 }
-                // [Left Mask]
                 if (isLeft > 0.5 && mask_uv_centered.x < -cutThreshold.x)
                 {
                     bool preserveTop    = (isTop < 0.5)    && (mask_uv_centered.y > cornerZone.y);
@@ -240,8 +241,9 @@ Shader "Custom/PuzzlePieceVertexData"
                 innerStrokeFactor *= mask;
                 outerStrokeFactor *= mask;
 
+
                 // ==============================
-                // 4. [纹理采样]
+                // 4. [纹理采样] 
                 // ==============================
                 float totalCells = _NumCols * _NumRows;
                 float safeIndex = clamp(_CellIndex, 1.0, totalCells);
@@ -258,10 +260,13 @@ Shader "Custom/PuzzlePieceVertexData"
                 // ==============================
                 // 5. [混合输出]
                 // ==============================
-                float innerOpacity = innerStrokeFactor * _InnerOutlineColor.a;
-                half3 rgbWithInner = _InnerOutlineColor.rgb * innerOpacity + texColor.rgb * (1.0 - innerOpacity);
-                float outerOpacity = outerStrokeFactor * _OuterOutlineColor.a;
-                half3 finalRGB = _OuterOutlineColor.rgb * outerOpacity + rgbWithInner * (1.0 - outerOpacity);
+                // 【核心修复】：加入 saturate 限幅保护，并使用标准 lerp 混合，彻底杜绝杂波和扣除底色！
+                float innerOpacity = saturate(innerStrokeFactor * _InnerOutlineColor.a);
+                half3 rgbWithInner = lerp(texColor.rgb, _InnerOutlineColor.rgb, innerOpacity);
+                
+                float outerOpacity = saturate(outerStrokeFactor * _OuterOutlineColor.a);
+                half3 finalRGB = lerp(rgbWithInner, _OuterOutlineColor.rgb, outerOpacity);
+                
                 half4 finalColor = half4(finalRGB, texColor.a * shapeAlpha);
 
                 #ifdef UNITY_UI_CLIP_RECT
