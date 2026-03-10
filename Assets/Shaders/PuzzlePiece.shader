@@ -9,11 +9,9 @@ Shader "Custom/PuzzlePiece"
         _CornerRadius ("Corner Radius", Range(0, 0.5)) = 0.1
         
         // --- 双描边属性 ---
-        // 外描边 (细黑线)
         _OuterOutlineWidth ("Outer Stroke Width", Range(0, 0.05)) = 0.005 
         _OuterOutlineColor ("Outer Stroke Color", Color) = (0,0,0,1)
         
-        // 内描边 (粗白线)
         _InnerOutlineWidth ("Inner Stroke Width", Range(0, 0.1)) = 0.015
         _InnerOutlineColor ("Inner Stroke Color", Color) = (1,1,1,1)
 
@@ -71,7 +69,7 @@ Shader "Custom/PuzzlePiece"
             CGPROGRAM
             #pragma vertex vert
             #pragma fragment frag
-            #pragma target 2.0
+            #pragma target 3.0
 
             #include "UnityCG.cginc"
             #include "UnityUI.cginc"
@@ -94,21 +92,22 @@ Shader "Custom/PuzzlePiece"
                 float4 worldPosition : TEXCOORD1;
             };
 
-            fixed4 _Color;
+            // 保持内存对齐的好习惯（防患未然）
             sampler2D _MainTex;
-            float4 _ClipRect;
+            fixed4 _Color;
+            fixed4 _OuterOutlineColor;
+            fixed4 _InnerOutlineColor;
             fixed4 _TextureSampleAdd;
+            float4 _ClipRect;
+            float4 _ConnectedState;
 
             float _CornerRadius;
             float _OuterOutlineWidth;
-            fixed4 _OuterOutlineColor;
             float _InnerOutlineWidth;
-            fixed4 _InnerOutlineColor;
             float _NumCols;
             float _NumRows;
             float _CellIndex;
             float _EdgeShrink;
-            float4 _ConnectedState;
 
             v2f vert(appdata_t v)
             {
@@ -120,7 +119,6 @@ Shader "Custom/PuzzlePiece"
                 return OUT;
             }
 
-            // SDF 函数
             float sdRoundedBoxIndependent(float2 p, float2 b, float4 r)
             {
                 float2 r_side = (p.x > 0.0) ? r.xy : r.zw;
@@ -137,41 +135,41 @@ Shader "Custom/PuzzlePiece"
                 float isLeft   = _ConnectedState.w;
 
                 // ==============================
+                // 0. 自适应长宽比修正
+                // ==============================
+                float rateX = length(float2(ddx(IN.uv.x), ddy(IN.uv.x)));
+                float rateY = length(float2(ddx(IN.uv.y), ddy(IN.uv.y)));
+                float scaleY = (rateY > 1e-6) ? (rateX / rateY) : 1.0; 
+                
+                float2 scaleSpace = float2(1.0, scaleY);
+                float2 uv_centered_scaled = (IN.uv - 0.5) * scaleSpace;
+
+                // ==============================
                 // 1. [双重坐标系统准备]
                 // ==============================
-                
-                // --- 系统 A: Mask 坐标系 (用于遮罩/裁切) ---
-                // 逻辑: 未连接时缩进(_EdgeShrink)，已连接时贴边(0.0)
                 float maskShrinkTop    = (isTop > 0.5)    ? 0.0 : _EdgeShrink;
                 float maskShrinkRight  = (isRight > 0.5)  ? 0.0 : _EdgeShrink;
                 float maskShrinkBottom = (isBottom > 0.5) ? 0.0 : _EdgeShrink;
                 float maskShrinkLeft   = (isLeft > 0.5)   ? 0.0 : _EdgeShrink;
 
-                float2 maskSize = float2(1.0 - maskShrinkLeft - maskShrinkRight, 1.0 - maskShrinkBottom - maskShrinkTop);
+                float2 baseSize = float2(1.0, 1.0) * scaleSpace;
+                float2 maskSize = baseSize - float2(maskShrinkLeft + maskShrinkRight, maskShrinkBottom + maskShrinkTop);
                 float2 maskHalfSize = maskSize * 0.5;
                 float2 maskCenterOffset = float2((maskShrinkLeft - maskShrinkRight) * 0.5, (maskShrinkBottom - maskShrinkTop) * 0.5);
-                float2 mask_uv_centered = IN.uv - 0.5 - maskCenterOffset;
+                float2 mask_uv_centered = uv_centered_scaled - maskCenterOffset;
 
-                // --- 系统 B: SDF 坐标系 (用于绘制形状) ---
-                // [关键修复]
-                // 如果一边连上了，我们将 SDF 的形状向外"膨胀"一个外描边的宽度。
-                // 这样，处于物理边缘的像素，就会落在 SDF 的"内描边(白)"区域，而不是"外描边(黑)"区域。
-                // 从而消除了垂直方向的黑色封口。
-                
                 float expandTop    = (isTop > 0.5)    ? _OuterOutlineWidth : 0.0;
                 float expandRight  = (isRight > 0.5)  ? _OuterOutlineWidth : 0.0;
                 float expandBottom = (isBottom > 0.5) ? _OuterOutlineWidth : 0.0;
                 float expandLeft   = (isLeft > 0.5)   ? _OuterOutlineWidth : 0.0;
 
-                // SDF 的尺寸 = Mask尺寸 + 向外膨胀的量
                 float2 sdfSize = maskSize + float2(expandLeft + expandRight, expandBottom + expandTop);
                 float2 sdfHalfSize = sdfSize * 0.5;
-                // SDF 的中心也需要相应偏移
                 float2 sdfCenterOffset = maskCenterOffset + float2((expandRight - expandLeft) * 0.5, (expandTop - expandBottom) * 0.5);
-                float2 sdf_uv_centered = IN.uv - 0.5 - sdfCenterOffset;
+                float2 sdf_uv_centered = uv_centered_scaled - sdfCenterOffset;
 
                 // ==============================
-                // 2. [SDF 计算] (使用膨胀后的坐标系)
+                // 2. [SDF 计算]
                 // ==============================
                 float r_TR = (isTop > 0.5 || isRight > 0.5) ? 0.0 : _CornerRadius;
                 float r_BR = (isBottom > 0.5 || isRight > 0.5) ? 0.0 : _CornerRadius;
@@ -181,46 +179,38 @@ Shader "Custom/PuzzlePiece"
 
                 float dist = sdRoundedBoxIndependent(sdf_uv_centered, sdfHalfSize, radii);
                 float delta = fwidth(dist);
-                float shapeAlpha = 1.0 - smoothstep(0.0 - delta, 0.0 + delta, dist);
+                
+                // 【修复点】：使用 saturate 确保形状 Alpha 不超标
+                float shapeAlpha = saturate(1.0 - smoothstep(0.0 - delta, 0.0 + delta, dist));
 
                 float totalWidth = _OuterOutlineWidth + _InnerOutlineWidth;
                 float innerStrokeFactor = smoothstep(-totalWidth - delta, -totalWidth + delta, dist);
                 float outerStrokeFactor = smoothstep(-_OuterOutlineWidth - delta, -_OuterOutlineWidth + delta, dist);
 
                 // ==============================
-                // 3. [遮罩逻辑] (使用原始 Mask 坐标系)
+                // 3. [遮罩逻辑]
                 // ==============================
-                // 注意：这里使用 maskHalfSize 和 mask_uv_centered
                 float mask = 1.0;
                 float epsilon = delta * 1.5;
                 float2 cutThreshold = maskHalfSize - totalWidth - epsilon;
-                float2 cornerZone = maskHalfSize - totalWidth; // 保护区阈值
+                float2 cornerZone = maskHalfSize - totalWidth; 
 
-                // [Top Mask]
-                if (isTop > 0.5 && mask_uv_centered.y > cutThreshold.y)
-                {
-                    // 保护逻辑：如果邻边未连接，保留该角的垂直描边
+                if (isTop > 0.5 && mask_uv_centered.y > cutThreshold.y) {
                     bool preserveRight = (isRight < 0.5) && (mask_uv_centered.x > cornerZone.x);
                     bool preserveLeft  = (isLeft < 0.5)  && (mask_uv_centered.x < -cornerZone.x);
                     if (!preserveRight && !preserveLeft) mask = 0.0;
                 }
-                // [Right Mask]
-                if (isRight > 0.5 && mask_uv_centered.x > cutThreshold.x)
-                {
+                if (isRight > 0.5 && mask_uv_centered.x > cutThreshold.x) {
                     bool preserveTop    = (isTop < 0.5)    && (mask_uv_centered.y > cornerZone.y);
                     bool preserveBottom = (isBottom < 0.5) && (mask_uv_centered.y < -cornerZone.y);
                     if (!preserveTop && !preserveBottom) mask = 0.0;
                 }
-                // [Bottom Mask]
-                if (isBottom > 0.5 && mask_uv_centered.y < -cutThreshold.y)
-                {
+                if (isBottom > 0.5 && mask_uv_centered.y < -cutThreshold.y) {
                     bool preserveRight = (isRight < 0.5) && (mask_uv_centered.x > cornerZone.x);
                     bool preserveLeft  = (isLeft < 0.5)  && (mask_uv_centered.x < -cornerZone.x);
                     if (!preserveRight && !preserveLeft) mask = 0.0;
                 }
-                // [Left Mask]
-                if (isLeft > 0.5 && mask_uv_centered.x < -cutThreshold.x)
-                {
+                if (isLeft > 0.5 && mask_uv_centered.x < -cutThreshold.x) {
                     bool preserveTop    = (isTop < 0.5)    && (mask_uv_centered.y > cornerZone.y);
                     bool preserveBottom = (isBottom < 0.5) && (mask_uv_centered.y < -cornerZone.y);
                     if (!preserveTop && !preserveBottom) mask = 0.0;
@@ -247,10 +237,13 @@ Shader "Custom/PuzzlePiece"
                 // ==============================
                 // 5. [混合输出]
                 // ==============================
-                float innerOpacity = innerStrokeFactor * _InnerOutlineColor.a;
-                half3 rgbWithInner = _InnerOutlineColor.rgb * innerOpacity + texColor.rgb * (1.0 - innerOpacity);
-                float outerOpacity = outerStrokeFactor * _OuterOutlineColor.a;
-                half3 finalRGB = _OuterOutlineColor.rgb * outerOpacity + rgbWithInner * (1.0 - outerOpacity);
+                // 【核心修复点】：严格将混合的透明度限制在 0.0 到 1.0 之间
+                float innerOpacity = saturate(innerStrokeFactor * _InnerOutlineColor.a);
+                half3 rgbWithInner = lerp(texColor.rgb, _InnerOutlineColor.rgb, innerOpacity);
+                
+                float outerOpacity = saturate(outerStrokeFactor * _OuterOutlineColor.a);
+                half3 finalRGB = lerp(rgbWithInner, _OuterOutlineColor.rgb, outerOpacity);
+                
                 half4 finalColor = half4(finalRGB, texColor.a * shapeAlpha);
 
                 #ifdef UNITY_UI_CLIP_RECT
