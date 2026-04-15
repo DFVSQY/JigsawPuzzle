@@ -12,12 +12,12 @@ Shader "Custom/PuzzlePieceVertexData"
         // --- SDF 基础属性 ---
         // 注意：现在的数值统一代表相对于“宽度”的比例。例如 0.1 代表宽度的 10%
         _CornerRadius ("Corner Radius", Range(0, 0.5)) = 0.1
-        
+
         // --- 双描边属性 ---
         // 外描边 (细黑线)
-        _OuterOutlineWidth ("Outer Stroke Width", Range(0, 0.05)) = 0.005 
+        _OuterOutlineWidth ("Outer Stroke Width", Range(0, 0.05)) = 0.005
         _OuterOutlineColor ("Outer Stroke Color", Color) = (0,0,0,1)
-        
+
         // 内描边 (粗白线)
         _InnerOutlineWidth ("Inner Stroke Width", Range(0, 0.1)) = 0.015
         _InnerOutlineColor ("Inner Stroke Color", Color) = (1,1,1,1)
@@ -155,8 +155,8 @@ Shader "Custom/PuzzlePieceVertexData"
                 // ==============================
                 float rateX = length(float2(ddx(IN.uv.x), ddy(IN.uv.x)));
                 float rateY = length(float2(ddx(IN.uv.y), ddy(IN.uv.y)));
-                float scaleY = (rateY > 1e-6) ? (rateX / rateY) : 1.0; 
-                
+                float scaleY = (rateY > 1e-6) ? (rateX / rateY) : 1.0;
+
                 float2 scaleSpace = float2(1.0, scaleY);
                 float2 uv_centered_scaled = (IN.uv - 0.5) * scaleSpace;
 
@@ -187,7 +187,7 @@ Shader "Custom/PuzzlePieceVertexData"
 
 
                 // ==============================
-                // 2. [SDF 计算] 
+                // 2. [SDF 计算]
                 // ==============================
                 float r_TR = (isTop > 0.5 || isRight > 0.5) ? 0.0 : _CornerRadius;
                 float r_BR = (isBottom > 0.5 || isRight > 0.5) ? 0.0 : _CornerRadius;
@@ -197,7 +197,7 @@ Shader "Custom/PuzzlePieceVertexData"
 
                 float dist = sdRoundedBoxIndependent(sdf_uv_centered, sdfHalfSize, radii);
                 float delta = fwidth(dist);
-                
+
                 // 【核心修复】：防止形状 Alpha 溢出反相
                 float shapeAlpha = saturate(1.0 - smoothstep(0.0 - delta, 0.0 + delta, dist));
 
@@ -211,7 +211,7 @@ Shader "Custom/PuzzlePieceVertexData"
                 float mask = 1.0;
                 float epsilon = delta * 1.5;
                 float2 cutThreshold = maskHalfSize - totalWidth - epsilon;
-                float2 cornerZone = maskHalfSize - totalWidth; 
+                float2 cornerZone = maskHalfSize - totalWidth;
 
                 if (isTop > 0.5 && mask_uv_centered.y > cutThreshold.y)
                 {
@@ -243,18 +243,33 @@ Shader "Custom/PuzzlePieceVertexData"
 
 
                 // ==============================
-                // 4. [纹理采样] 
+                // 4. [纹理采样] (修复版：解决 AMD/Exynos 等 GPU 浮点异常及 fmod 越界问题)
                 // ==============================
-                float totalCells = _NumCols * _NumRows;
-                float safeIndex = clamp(_CellIndex, 1.0, totalCells);
-                float mathIndex = floor(safeIndex - 1.0 + 0.1);
-                float colIndex = fmod(mathIndex, _NumCols);
-                float rowIndex = floor(mathIndex / _NumCols);
-                float2 cellSize = float2(1.0 / _NumCols, 1.0 / _NumRows);
-                float targetRow = (_NumRows - 1.0) - rowIndex;
+                // 强制将外部参数对齐到绝对的整数，抹平网格传递带来的精度误差
+                float cols = round(_NumCols);
+                float rows = round(_NumRows);
+                float index = round(_CellIndex);
+
+                float totalCells = cols * rows;
+                float safeIndex = clamp(index, 1.0, totalCells);
+                
+                // 基于 0 的索引
+                float mathIndex = safeIndex - 1.0; 
+
+                // 安全计算行号 (加上 0.1 避免 3.0/3.0=0.9999 被 floor 砍成 0)
+                float rowIndex = floor((mathIndex + 0.1) / cols);
+
+                // 绝对安全的求余运算，替代 fmod！
+                float colIndex = mathIndex - rowIndex * cols;
+
+                // 计算 UV 的基础大小
+                float2 cellSize = float2(1.0 / cols, 1.0 / rows);
+                float targetRow = (rows - 1.0) - rowIndex;
+
                 float2 gridUV;
                 gridUV.x = (IN.uv.x + colIndex) * cellSize.x;
                 gridUV.y = (IN.uv.y + targetRow) * cellSize.y;
+                
                 half4 texColor = (tex2D(_MainTex, gridUV) + _TextureSampleAdd) * IN.color;
 
                 // ==============================
@@ -263,10 +278,10 @@ Shader "Custom/PuzzlePieceVertexData"
                 // 【核心修复】：加入 saturate 限幅保护，并使用标准 lerp 混合，彻底杜绝杂波和扣除底色！
                 float innerOpacity = saturate(innerStrokeFactor * _InnerOutlineColor.a);
                 half3 rgbWithInner = lerp(texColor.rgb, _InnerOutlineColor.rgb, innerOpacity);
-                
+
                 float outerOpacity = saturate(outerStrokeFactor * _OuterOutlineColor.a);
                 half3 finalRGB = lerp(rgbWithInner, _OuterOutlineColor.rgb, outerOpacity);
-                
+
                 half4 finalColor = half4(finalRGB, texColor.a * shapeAlpha);
 
                 #ifdef UNITY_UI_CLIP_RECT
