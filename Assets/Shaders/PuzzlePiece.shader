@@ -7,11 +7,11 @@ Shader "Custom/PuzzlePiece"
 
         // --- SDF 基础属性 ---
         _CornerRadius ("Corner Radius", Range(0, 0.5)) = 0.1
-        
+
         // --- 双描边属性 ---
-        _OuterOutlineWidth ("Outer Stroke Width", Range(0, 0.05)) = 0.005 
+        _OuterOutlineWidth ("Outer Stroke Width", Range(0, 0.05)) = 0.005
         _OuterOutlineColor ("Outer Stroke Color", Color) = (0,0,0,1)
-        
+
         _InnerOutlineWidth ("Inner Stroke Width", Range(0, 0.1)) = 0.015
         _InnerOutlineColor ("Inner Stroke Color", Color) = (1,1,1,1)
 
@@ -139,8 +139,8 @@ Shader "Custom/PuzzlePiece"
                 // ==============================
                 float rateX = length(float2(ddx(IN.uv.x), ddy(IN.uv.x)));
                 float rateY = length(float2(ddx(IN.uv.y), ddy(IN.uv.y)));
-                float scaleY = (rateY > 1e-6) ? (rateX / rateY) : 1.0; 
-                
+                float scaleY = (rateY > 1e-6) ? (rateX / rateY) : 1.0;
+
                 float2 scaleSpace = float2(1.0, scaleY);
                 float2 uv_centered_scaled = (IN.uv - 0.5) * scaleSpace;
 
@@ -179,7 +179,7 @@ Shader "Custom/PuzzlePiece"
 
                 float dist = sdRoundedBoxIndependent(sdf_uv_centered, sdfHalfSize, radii);
                 float delta = fwidth(dist);
-                
+
                 // 【修复点】：使用 saturate 确保形状 Alpha 不超标
                 float shapeAlpha = saturate(1.0 - smoothstep(0.0 - delta, 0.0 + delta, dist));
 
@@ -193,7 +193,7 @@ Shader "Custom/PuzzlePiece"
                 float mask = 1.0;
                 float epsilon = delta * 1.5;
                 float2 cutThreshold = maskHalfSize - totalWidth - epsilon;
-                float2 cornerZone = maskHalfSize - totalWidth; 
+                float2 cornerZone = maskHalfSize - totalWidth;
 
                 if (isTop > 0.5 && mask_uv_centered.y > cutThreshold.y) {
                     bool preserveRight = (isRight < 0.5) && (mask_uv_centered.x > cornerZone.x);
@@ -220,18 +220,34 @@ Shader "Custom/PuzzlePiece"
                 outerStrokeFactor *= mask;
 
                 // ==============================
-                // 4. [纹理采样]
+                // 4. [纹理采样] (修复版：解决 AMD/Exynos 等 GPU 浮点异常及 fmod 越界问题)
                 // ==============================
-                float totalCells = _NumCols * _NumRows;
-                float safeIndex = clamp(_CellIndex, 1.0, totalCells);
-                float mathIndex = floor(safeIndex - 1.0 + 0.1);
-                float colIndex = fmod(mathIndex, _NumCols);
-                float rowIndex = floor(mathIndex / _NumCols);
-                float2 cellSize = float2(1.0 / _NumCols, 1.0 / _NumRows);
-                float targetRow = (_NumRows - 1.0) - rowIndex;
+                // 强制将外部参数对齐到绝对的整数，抹平 2.9999 或 3.0001 的微小误差
+                float cols = round(_NumCols);
+                float rows = round(_NumRows);
+                float index = round(_CellIndex);
+
+                float totalCells = cols * rows;
+                float safeIndex = clamp(index, 1.0, totalCells);
+                
+                // 基于 0 的索引
+                float mathIndex = safeIndex - 1.0; 
+
+                // 安全计算行号 (加上 0.1 避免 3.0/3.0=0.9999 被 floor 砍成 0)
+                float rowIndex = floor((mathIndex + 0.1) / cols);
+
+                // 绝对安全的求余运算，替代 fmod！
+                // 整数相减不会出现底层架构对 fmod(x,x) 的错误判断边界
+                float colIndex = mathIndex - rowIndex * cols;
+
+                // 计算 UV 的基础大小
+                float2 cellSize = float2(1.0 / cols, 1.0 / rows);
+                float targetRow = (rows - 1.0) - rowIndex;
+
                 float2 gridUV;
                 gridUV.x = (IN.uv.x + colIndex) * cellSize.x;
                 gridUV.y = (IN.uv.y + targetRow) * cellSize.y;
+                
                 half4 texColor = (tex2D(_MainTex, gridUV) + _TextureSampleAdd) * IN.color;
 
                 // ==============================
@@ -240,10 +256,10 @@ Shader "Custom/PuzzlePiece"
                 // 【核心修复点】：严格将混合的透明度限制在 0.0 到 1.0 之间
                 float innerOpacity = saturate(innerStrokeFactor * _InnerOutlineColor.a);
                 half3 rgbWithInner = lerp(texColor.rgb, _InnerOutlineColor.rgb, innerOpacity);
-                
+
                 float outerOpacity = saturate(outerStrokeFactor * _OuterOutlineColor.a);
                 half3 finalRGB = lerp(rgbWithInner, _OuterOutlineColor.rgb, outerOpacity);
-                
+
                 half4 finalColor = half4(finalRGB, texColor.a * shapeAlpha);
 
                 #ifdef UNITY_UI_CLIP_RECT
